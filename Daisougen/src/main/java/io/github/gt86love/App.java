@@ -104,7 +104,6 @@ public class App {
     }
 
     private static void tokenize(String input, List<String> targetList) {
-        // 右シフト >> や比較演算子がバラバラに分解されないように保護するトークナイザー
         String prepared = input
             .replaceAll(">>", " __RSHIFT__ ")
             .replaceAll("==", " __EQ__ ")
@@ -112,7 +111,8 @@ public class App {
             .replaceAll(">=", " __GE__ ")
             .replaceAll("<=", " __LE__ ");
 
-        Pattern pattern = Pattern.compile("\"[^\"]*\"|==|!=|>=|<=|[(){}=.+\\-<>!*/]|[^\\s(){}=.+\\-<>!*/]+");
+        // 記号の切り分けパターンに % を追加
+        Pattern pattern = Pattern.compile("\"[^\"]*\"|==|!=|>=|<=|[(){}=.+\\-<>!*/%]|[^\\s(){}=.+\\-<>!*/%]+");
         Matcher matcher = pattern.matcher(prepared);
         while (matcher.find()) {
             String token = matcher.group();
@@ -198,27 +198,26 @@ public class App {
         }
     }
 
-    // 四則演算と右シフトの優先順位を考慮して無限に連続計算する数式解析エンジン
     private static Object parseExpression() {
         List<Object> exprTokens = new ArrayList<>();
         List<String> operators = new ArrayList<>();
 
-        // 1. まず現在の数式ブロック（演算子が続く限り）を一気に先読みしてリスト化する
         String first = tokens.get(pos++);
         exprTokens.add(variables.containsKey(first) ? variables.get(first).value : first);
 
+        // ループ判定の対象演算子に % を追加
         while (pos < tokens.size() && (tokens.get(pos).equals("+") || tokens.get(pos).equals("-") || 
                                        tokens.get(pos).equals("*") || tokens.get(pos).equals("/") || 
-                                       tokens.get(pos).equals(">>"))) {
+                                       tokens.get(pos).equals("%") || tokens.get(pos).equals(">>"))) {
             operators.add(tokens.get(pos++));
             String nextToken = tokens.get(pos++);
             exprTokens.add(variables.containsKey(nextToken) ? variables.get(nextToken).value : nextToken);
         }
 
-        // 2. 優先度の高い演算子（*, /, >>）を左から順番に先に計算してまとめる
+        // 優先度の高い演算子（*, /, %, >>）を処理
         for (int i = 0; i < operators.size(); i++) {
             String op = operators.get(i);
-            if (op.equals("*") || op.equals("/") || op.equals(">>")) {
+            if (op.equals("*") || op.equals("/") || op.equals("%") || op.equals(">>")) {
                 Object left = exprTokens.get(i);
                 Object right = exprTokens.get(i + 1);
                 Object res = 0L;
@@ -227,6 +226,7 @@ public class App {
                     long n2 = Long.parseLong(String.valueOf(right).replace("\"", ""));
                     if (op.equals("*")) res = n1 * n2;
                     else if (op.equals("/")) res = n1 / n2;
+                    else if (op.equals("%")) res = n1 % n2; // 余り計算の処理を追加！
                     else res = n1 >> n2;
                 } catch (Exception e) {
                     res = String.valueOf(left).replace("\"", "") + String.valueOf(right).replace("\"", "");
@@ -234,11 +234,10 @@ public class App {
                 exprTokens.set(i, res);
                 exprTokens.remove(i + 1);
                 operators.remove(i);
-                i--; // 要素が詰まったのでインデックスを戻す
+                i--; 
             }
         }
 
-        // 3. 残った優先度の低い演算子（+, -）を左から順番に計算する
         Object currentVal = exprTokens.get(0);
         for (int i = 0; i < operators.size(); i++) {
             String op = operators.get(i);
@@ -397,7 +396,7 @@ public class App {
             if (TYPES.contains(now)) {
                 String type = now; 
                 String varName = tokens.get(pos++); 
-                pos++; // "="
+                pos++; 
                 
                 Object finalVal = parseExpression(); 
 
@@ -437,7 +436,7 @@ public class App {
 
             if (variables.containsKey(now) && pos < tokens.size() && tokens.get(pos).equals("=")) {
                 String varName = now;
-                pos++; // "="
+                pos++; 
                 
                 Object finalVal = parseExpression(); 
                 
