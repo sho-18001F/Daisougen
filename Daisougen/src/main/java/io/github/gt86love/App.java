@@ -8,6 +8,7 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -38,13 +39,10 @@ public class App {
         String mainFilePath = null;
         List<String> linkTargets = new ArrayList<>();
 
-        // 1. コマンドライン引数をパースする
         for (String arg : args) {
             if (arg.startsWith("--link:")) {
-                // --link: の後ろの部分を抽出して退避
                 linkTargets.add(arg.substring(7));
             } else {
-                // --link: 以外の引数をメインの実行ファイルパスとして認識
                 mainFilePath = arg;
             }
         }
@@ -54,15 +52,13 @@ public class App {
             return;
         }
 
-        // 2. 事前リンク指定（--link:）された外部コードをすべて先にダウンロードして合体する
         for (String target : linkTargets) {
             String linkContent = fetchCode(target);
             if (!linkContent.isEmpty()) {
-                tokenize(linkContent, tokens); // 先頭にどんどんトークンを貯める
+                tokenize(linkContent, tokens);
             }
         }
 
-        // 3. メインスクリプトを読み込んで末尾に合体させる
         String sourceCode = "";
         try {
             if (Files.exists(Paths.get(mainFilePath))) {
@@ -76,10 +72,7 @@ public class App {
             return;
         }
 
-        // メインスクリプトのトークンを追加
         tokenize(sourceCode, tokens);
-
-        // 4. 既存の include 構文（コード内 include）も一応解決させておく
         resolveIncludes();
 
         // 【事前スキャン】
@@ -111,14 +104,27 @@ public class App {
     }
 
     private static void tokenize(String input, List<String> targetList) {
-        Pattern pattern = Pattern.compile("\"[^\"]*\"|==|!=|>=|<=|[(){}=.+\\-<>!]|-?\\d+|[^\\s(){}=.+\\-<>!]+");
-        Matcher matcher = pattern.matcher(input);
+        // 右シフト >> や比較演算子がバラバラに分解されないように保護するトークナイザー
+        String prepared = input
+            .replaceAll(">>", " __RSHIFT__ ")
+            .replaceAll("==", " __EQ__ ")
+            .replaceAll("!=", " __NE__ ")
+            .replaceAll(">=", " __GE__ ")
+            .replaceAll("<=", " __LE__ ");
+
+        Pattern pattern = Pattern.compile("\"[^\"]*\"|==|!=|>=|<=|[(){}=.+\\-<>!*/]|[^\\s(){}=.+\\-<>!*/]+");
+        Matcher matcher = pattern.matcher(prepared);
         while (matcher.find()) {
-            targetList.add(matcher.group());
+            String token = matcher.group();
+            if (token.equals("__RSHIFT__")) token = ">>";
+            else if (token.equals("__EQ__")) token = "==";
+            else if (token.equals("__NE__")) token = "!=";
+            else if (token.equals("__GE__")) token = ">=";
+            else if (token.equals("__LE__")) token = "<=";
+            targetList.add(token);
         }
     }
 
-    // ローカルファイルまたはインターネットURLから文字列コードを取得する共通ヘルパー
     private static String fetchCode(String pathOrUrl) {
         try {
             if (pathOrUrl.startsWith("http://") || pathOrUrl.startsWith("https://")) {
@@ -143,7 +149,6 @@ public class App {
         return "";
     }
 
-    // 既存のコード内 include 構文用
     private static void resolveIncludes() {
         while (pos < tokens.size()) {
             if (tokens.get(pos).equals("include")) {
@@ -191,6 +196,62 @@ public class App {
                 default -> false;
             };
         }
+    }
+
+    // 四則演算と右シフトの優先順位を考慮して無限に連続計算する数式解析エンジン
+    private static Object parseExpression() {
+        List<Object> exprTokens = new ArrayList<>();
+        List<String> operators = new ArrayList<>();
+
+        // 1. まず現在の数式ブロック（演算子が続く限り）を一気に先読みしてリスト化する
+        String first = tokens.get(pos++);
+        exprTokens.add(variables.containsKey(first) ? variables.get(first).value : first);
+
+        while (pos < tokens.size() && (tokens.get(pos).equals("+") || tokens.get(pos).equals("-") || 
+                                       tokens.get(pos).equals("*") || tokens.get(pos).equals("/") || 
+                                       tokens.get(pos).equals(">>"))) {
+            operators.add(tokens.get(pos++));
+            String nextToken = tokens.get(pos++);
+            exprTokens.add(variables.containsKey(nextToken) ? variables.get(nextToken).value : nextToken);
+        }
+
+        // 2. 優先度の高い演算子（*, /, >>）を左から順番に先に計算してまとめる
+        for (int i = 0; i < operators.size(); i++) {
+            String op = operators.get(i);
+            if (op.equals("*") || op.equals("/") || op.equals(">>")) {
+                Object left = exprTokens.get(i);
+                Object right = exprTokens.get(i + 1);
+                Object res = 0L;
+                try {
+                    long n1 = Long.parseLong(String.valueOf(left).replace("\"", ""));
+                    long n2 = Long.parseLong(String.valueOf(right).replace("\"", ""));
+                    if (op.equals("*")) res = n1 * n2;
+                    else if (op.equals("/")) res = n1 / n2;
+                    else res = n1 >> n2;
+                } catch (Exception e) {
+                    res = String.valueOf(left).replace("\"", "") + String.valueOf(right).replace("\"", "");
+                }
+                exprTokens.set(i, res);
+                exprTokens.remove(i + 1);
+                operators.remove(i);
+                i--; // 要素が詰まったのでインデックスを戻す
+            }
+        }
+
+        // 3. 残った優先度の低い演算子（+, -）を左から順番に計算する
+        Object currentVal = exprTokens.get(0);
+        for (int i = 0; i < operators.size(); i++) {
+            String op = operators.get(i);
+            Object nextVal = exprTokens.get(i + 1);
+            try {
+                long num1 = Long.parseLong(String.valueOf(currentVal).replace("\"", ""));
+                long num2 = Long.parseLong(String.valueOf(nextVal).replace("\"", ""));
+                currentVal = op.equals("+") ? (num1 + num2) : (num1 - num2);
+            } catch (Exception e) {
+                currentVal = String.valueOf(currentVal).replace("\"", "") + String.valueOf(nextVal).replace("\"", "");
+            }
+        }
+        return currentVal;
     }
 
     @SuppressWarnings("unchecked")
@@ -336,23 +397,9 @@ public class App {
             if (TYPES.contains(now)) {
                 String type = now; 
                 String varName = tokens.get(pos++); 
-                pos++; 
+                pos++; // "="
                 
-                String first = tokens.get(pos++); 
-                Object finalVal = variables.containsKey(first) ? variables.get(first).value : first;
-
-                if (pos < tokens.size() && (tokens.get(pos).equals("+") || tokens.get(pos).equals("-"))) {
-                    String op = tokens.get(pos++); 
-                    String second = tokens.get(pos++); 
-                    Object secondVal = variables.containsKey(second) ? variables.get(second).value : second;
-                    try {
-                        long num1 = Long.parseLong(String.valueOf(finalVal).replace("\"", ""));
-                        long num2 = Long.parseLong(String.valueOf(secondVal).replace("\"", ""));
-                        finalVal = op.equals("+") ? (num1 + num2) : (num1 - num2);
-                    } catch (Exception e) {
-                        finalVal = String.valueOf(finalVal).replace("\"", "") + String.valueOf(secondVal).replace("\"", "");
-                    }
-                }
+                Object finalVal = parseExpression(); 
 
                 if (type.equals("list")) {
                     variables.put(varName, new Variable(type, new ArrayList<>()));
@@ -390,22 +437,10 @@ public class App {
 
             if (variables.containsKey(now) && pos < tokens.size() && tokens.get(pos).equals("=")) {
                 String varName = now;
-                pos++; 
-                String first = tokens.get(pos++);
-                Object finalVal = variables.containsKey(first) ? variables.get(first).value : first;
-
-                if (pos < tokens.size() && (tokens.get(pos).equals("+") || tokens.get(pos).equals("-"))) {
-                    String op = tokens.get(pos++); 
-                    String second = tokens.get(pos++); 
-                    Object secondVal = variables.containsKey(second) ? variables.get(second).value : second;
-                    try {
-                        long num1 = Long.parseLong(String.valueOf(finalVal).replace("\"", ""));
-                        long num2 = Long.parseLong(String.valueOf(secondVal).replace("\"", ""));
-                        finalVal = op.equals("+") ? (num1 + num2) : (num1 - num2);
-                    } catch (Exception e) {
-                        finalVal = String.valueOf(finalVal).replace("\"", "") + String.valueOf(secondVal).replace("\"", "");
-                    }
-                }
+                pos++; // "="
+                
+                Object finalVal = parseExpression(); 
+                
                 variables.put(varName, new Variable(variables.get(varName).type, String.valueOf(finalVal)));
                 continue;
             }
